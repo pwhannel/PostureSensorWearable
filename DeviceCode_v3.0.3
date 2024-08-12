@@ -1,0 +1,118 @@
+#include <Wire.h>
+#include <SPI.h>
+#include <Arduino.h>
+#include <Adafruit_LIS3DH.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_DRV2605.h>
+//#include <SoftwareSerial.h>
+#include <Adafruit_BLE.h>
+#include <Adafruit_BluefruitLE_SPI.h>
+//#include <Adafruit_BluefruitLE_UART.h>
+#include "BluefruitConfig.h"
+
+Adafruit_LIS3DH lis = Adafruit_LIS3DH(); //Create the accelerometer object
+
+Adafruit_DRV2605 drv; //Create the haptic driver object
+
+Adafruit_BluefruitLE_SPI ble(BLUEFRUIT_SPI_CS, BLUEFRUIT_SPI_IRQ, BLUEFRUIT_SPI_RST); // Create the bluefruit object
+
+// A small helper
+void error(const __FlashStringHelper*err) {
+  Serial.println(err);
+  while (1);
+}
+
+int RawData; //For LPF
+float SmoothData; //For LPF 
+float LPF_Beta = 0.004; // 0<ß<1 // Set the beta decay rate
+float BadPostureAngle; 
+float BadPostureMax;
+float BadPostureMin;
+int BadPostureVariance = 50; // The ± variance that will set off a haptic alert
+int WaitCounter = 1;
+
+#define CLICKTHRESHHOLD 18  //Sensitivity of accelerometer tap force (5-10 std, higher = less sensitive)
+
+void setup(void) {
+
+  Serial.begin(115200); // Fast serial baud for BLE
+
+  drv.begin(); //Initialize haptic driver
+  drv.selectLibrary(4); //Select the haptic driver library (3 or 4 for Mark I & II motor)
+  drv.setMode(DRV2605_MODE_INTTRIG); //Sets the trigger mode
+    // Set up the haptic tap series
+  drv.setWaveform(0, 4);  // play effect 4
+  drv.setWaveform(1, 132);  // pause 
+  drv.setWaveform(2, 132);  // pause 
+  drv.setWaveform(3, 132);  // pause 
+  drv.setWaveform(4, 4);  // play effect 4
+  drv.setWaveform(5, 0);  // end waveform
+  
+  if (! lis.begin(0x18)) {   // change this to 0x19 for alternative accel i2c address
+    Serial.println("LIS3DH could not start.");
+    while (1);
+  }
+  Serial.println("LIS3DH found!");
+  
+  lis.setRange(LIS3DH_RANGE_16_G);   // 2, 4, 8 or 16 G
+
+ if ( !ble.begin(VERBOSE_MODE) ) //Initialize the Bluefruit module
+  {
+    error(F("Couldn't find Bluefruit, make sure it's in Command mode & check wiring?"));
+  }
+  Serial.println( F("Bluefruit OK!") );
+
+  if ( ! ble.factoryReset() ){      // Perform a factory reset to make sure BLE is in a known state, remove for production 
+    error(F("Couldn't factory reset"));
+  }
+
+  ble.echo(false);   // Disable command echo from BLE
+  
+  ble.setMode(BLUEFRUIT_MODE_DATA);  // Complete BLE setup mode
+
+  lis.setClick(2, CLICKTHRESHHOLD);  // Set double-click mode for the accelerometer
+  delay(100);  
+}
+
+void loop() {
+
+  lis.read();   // Poll the accelerometer
+
+  uint8_t click = lis.getClick(); // Listen for taps
+
+    // LPF: Y(n) = (1-ß)*Y(n-1) + (ß*X(n))) = Y(n-1) - (ß*(Y(n-1)-X(n)));
+    //   RawData = lis.y;  // Import the sensor reading
+    //   SmoothData = SmoothData - (LPF_Beta * (SmoothData - RawData));  // Filter it
+  SmoothData = lis.y;  // Bypass the LPF   
+
+  Serial.print("Y:  "); Serial.print(SmoothData);   // Then print out the smoothed data
+  Serial.println();
+  
+  ble.print("Y: "); ble.print(SmoothData); ble.print("\n");  // Send it via BLE
+
+  if (click & 0x20) {
+    BadPostureAngle = SmoothData; // If double tap detected, mark the angle
+    BadPostureMin = BadPostureAngle - BadPostureVariance;
+    BadPostureMax = BadPostureAngle + BadPostureVariance;
+    Serial.print("Double Click Detected at: "); Serial.print(BadPostureAngle);
+    Serial.println();
+  }
+
+  Serial.print("Marker currently at "); Serial.print(BadPostureAngle); // Note the bad posture angle
+  Serial.println();
+  ble.print ("A: "); ble.print(BadPostureAngle); ble.print("\t"); // Send the bad posture angle as a value for plotting
+
+if (SmoothData > BadPostureMin && SmoothData < BadPostureMax) {  // Conditions for haptic alert 
+     WaitCounter = WaitCounter + 1; // Start an incremental delay for haptic alert
+  } else if (WaitCounter > 1) {
+    WaitCounter = WaitCounter - 1; // Let the counter decay
+  }
+
+if (WaitCounter == 10) {
+     drv.go(); // Trigger the haptic sequence
+     WaitCounter = 1;
+}
+
+  delay(100);  // Polling rate
+  
+}
